@@ -15,12 +15,19 @@ ICDKDataCommitteeErrors, OwnableUpgradeable {
     struct Member {
         string url;
         address addr;
+        uint256 feePercentage;
     }
 
     // Size of a signature in bytes
     uint internal constant _SIGNATURE_SIZE = 65;
     // Size of an address in bytes
     uint internal constant _ADDR_SIZE = 20;
+
+    // Default fee percentage
+    uint256 public constant DEFAULT_FEE_PERCENTAGE = 2;
+
+    // Maximum fee percentage
+    uint256 public constant MAX_FEE_PERCENTAGE = 30;
 
     // Specifies the required amount of signatures from members in the data availability committee
     uint public requiredAmountOfSignatures;
@@ -81,7 +88,8 @@ ICDKDataCommitteeErrors, OwnableUpgradeable {
             lastAddr = currentMemberAddr;
             members.push(Member({
                 url: urls[i],
-                addr: currentMemberAddr
+                addr: currentMemberAddr,
+                feePercentage: DEFAULT_FEE_PERCENTAGE
             }));
         }
         committeeHash = keccak256(addrsBytes);
@@ -103,33 +111,32 @@ ICDKDataCommitteeErrors, OwnableUpgradeable {
     function verifySignatures(
         bytes32 signedHash,
         bytes calldata signaturesAndAddrs
-    ) external view {
-        // pre-check: byte array size
+    ) external view returns (address[] memory validSigners) {
+        // Pre-check: byte array size
         uint splitByte = _SIGNATURE_SIZE * requiredAmountOfSignatures;
-        if(
-            signaturesAndAddrs.length < splitByte ||
-            (signaturesAndAddrs.length - splitByte) % _ADDR_SIZE != 0
-        ) {
-            revert UnexpectedAddrsAndSignaturesSize();
-        }
+        require(
+            signaturesAndAddrs.length >= splitByte &&
+            (signaturesAndAddrs.length - splitByte) % _ADDR_SIZE == 0,
+            "UnexpectedAddrsAndSignaturesSize"
+        );
 
-        // hash the addresses part of the byte array and check that it's equal to committe hash
-        if (
-            keccak256(signaturesAndAddrs[splitByte:]) != 
-            committeeHash
-        ) {
-            revert UnexpectedCommitteeHash();
-        }
+        // Hash the addresses part of the byte array and check that it's equal to committee hash
+        require(
+            keccak256(signaturesAndAddrs[splitByte:]) == committeeHash,
+            "UnexpectedCommitteeHash"
+        );
 
-        // recover addresses from signatures and check that are part of the committee
+        validSigners = new address[](requiredAmountOfSignatures);
         uint lastAddrIndexUsed;
         uint addrsLen = (signaturesAndAddrs.length - splitByte) / _ADDR_SIZE;
+
         for (uint i = 0; i < requiredAmountOfSignatures; i++) {
             address currentSigner = ECDSA.recover(
                 signedHash,
-                signaturesAndAddrs[i*_SIGNATURE_SIZE : i*_SIGNATURE_SIZE + _SIGNATURE_SIZE]
+                signaturesAndAddrs[i * _SIGNATURE_SIZE : i * _SIGNATURE_SIZE + _SIGNATURE_SIZE]
             );
             bool currentSignerIsPartOfCommittee = false;
+
             for (uint j = lastAddrIndexUsed; j < addrsLen; j++) {
                 uint currentAddresStartingByte = splitByte + j*_ADDR_SIZE;
                 address committeeAddr = address(bytes20(signaturesAndAddrs[
@@ -139,11 +146,28 @@ ICDKDataCommitteeErrors, OwnableUpgradeable {
                 if (committeeAddr == currentSigner) {
                     lastAddrIndexUsed = j+1;
                     currentSignerIsPartOfCommittee = true;
+                    validSigners[i] = currentSigner;
                     break;
                 }
             }
-            if (!currentSignerIsPartOfCommittee) {
-                revert CommitteeAddressDoesntExist();
+
+            require(currentSignerIsPartOfCommittee, "CommitteeAddressDoesntExist");
+        }
+
+        return validSigners; // Returns the valid signers to be rewarded
+    }
+
+    function updateFeePercentage(address _member, uint256 _newFeePercentage) external {
+        require(_newFeePercentage >= DEFAULT_FEE_PERCENTAGE, "Fee percentage too low");
+        require(_newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee percentage too high");
+        
+        // Check if the member is the one updating their own fee
+        // Update the fee percentage
+        for (uint256 i = 0; i < members.length; i++) {
+            if (members[i].addr == _member) {
+                require(msg.sender == _member, "Only the member can update their own fee");
+                members[i].feePercentage = _newFeePercentage;
+                break;
             }
         }
     }
